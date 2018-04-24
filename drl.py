@@ -63,11 +63,11 @@ else:
 
 @ex.config
 def config():
-    nactors = 8  # how many ray actors will be created (if <0, set as #CPUs)
+    nactors = 160  # how many ray actors will be created (if <0, set as #CPUs)
     envname = 'StreetFigherIi-v0'  # which gym environment is to be solved
     optimizer = 'ARS'  # which search method is to use (ARS,XNES,SNES,BDNES)
     niters = 10000  # number of iterations
-    popsize = 20  # population size
+    popsize = 160  # population size
     truncation_size = 20  # truncation size for ARS
     learning_rate = 0.05  # NES learning rate for search distribution reshaping
     center_learning_rate = 1.0  # NES learning rate for the center of dist
@@ -83,7 +83,7 @@ ray.init()
 class Model(nn.Module):
     def __init__(self, conv_depth, output_size, img_w, img_h, img_depth=1):
         super(Model, self).__init__()
-        self.conv1 = nn.Conv2d(3, 10, 3, padding=1)
+        self.conv1 = nn.Conv2d(1, 10, 3, padding=1)
 
 
         #hiddus 
@@ -161,8 +161,8 @@ class SF2(dre.BaseProblem):
         self.vis = False
     
     def obs_proc(self,obs):
-        #br = block_reduce(obs, block_size=(1,1,1), func=np.max)
-        br = obs
+        br = block_reduce(obs, block_size=(1,1,3), func=np.max)
+        #br = obs
         #pad zeros in first dimension (height)
         return np.pad(br, ((0,32),(0,0),(0,0)), 'constant', constant_values=0)
 
