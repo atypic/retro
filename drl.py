@@ -2,6 +2,8 @@
 
 from __future__ import print_function, division
 
+import glob
+
 from datetime import datetime
 
 import subprocess
@@ -16,12 +18,20 @@ from scipy.misc import imsave
 import gym
 import gym_rle
 
+#from bokeh.plotting import figure 
+#from bokeh.io import export_png
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+
 import darwin.evolution as dre
 from darwin.rl import AgentRunner
 from darwin.rl.normalizer import Normalizer
 from darwin.rl.rlproblem import RLProblem, spawn_actor
 from darwin.randomhelper import Randomness
 from darwin.repeatedvalue import RepeatedValue
+from darwin.torchhelper import *
 
 import pickle
 import cloudpickle
@@ -37,6 +47,13 @@ import psutil
 
 import numpy as np
 
+#pytorch
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+
+
 
 if __name__ == "__main__":
     ex = Experiment()
@@ -46,13 +63,13 @@ else:
 
 @ex.config
 def config():
-    nactors = -1  # how many ray actors will be created (if <0, set as #CPUs)
+    nactors = 8  # how many ray actors will be created (if <0, set as #CPUs)
     envname = 'StreetFigherIi-v0'  # which gym environment is to be solved
     optimizer = 'ARS'  # which search method is to use (ARS,XNES,SNES,BDNES)
     niters = 10000  # number of iterations
     popsize = 20  # population size
     truncation_size = 20  # truncation size for ARS
-    learning_rate = 0.1  # NES learning rate for search distribution reshaping
+    learning_rate = 0.05  # NES learning rate for search distribution reshaping
     center_learning_rate = 1.0  # NES learning rate for the center of dist
     stdev = 0.1  # standard deviation of the search distribution
     nsamples = 10  # by using how many trajectories will an agent be evaluated
@@ -63,43 +80,135 @@ def config():
 
 ray.init()
 
+class Model(nn.Module):
+    def __init__(self, conv_depth, output_size, img_w, img_h, img_depth=1):
+        super(Model, self).__init__()
+        self.conv1 = nn.Conv2d(3, 10, 3, padding=1)
+
+
+        #hiddus 
+        self.rnn1 = nn.RNN(10*int(img_w/8)*int(img_h/8), output_size, 1, nonlinearity='relu')
+
+        #output is supposed to be... (N, C_out, H_out, W_out)
+        #10 kernels, with pooling in between
+        #self.fc1 = nn.Linear(10*int(img_w/8)*int(img_h/8), output_size)
+
+        self.h0 = Variable(torch.zeros(1,1, output_size), requires_grad=False)
+
+    def forward(self, x):
+       x = F.relu(F.max_pool2d(self.conv1(x), kernel_size=8, stride=8))
+
+       r = x.view(1,1, self.num_flat_features(x))
+       
+       x, self.h0 = self.rnn1(r, self.h0)
+
+       self.h0 = self.h0.detach()
+
+       #flattening it is important. no flatten means no worky work.
+       #x = x.view(-1, self.num_flat_features(x))   #flatten it
+       #fcx = self.fc1(x)
+       return x
+
+    def update_weights(self, w):
+        self.weight.conv1.data = w
+
+    def num_flat_features(self, x):
+        size = x.size()[1:]  # all dimensions except the batch dimension
+        num_features = 1
+        for s in size:       # Get the products
+            num_features *= s
+        return num_features    
+ 
 class SF2(dre.BaseProblem):
-    def __init__(self, solution_vector_length):
+    def __init__(self):
+
+        
+        self.env = gym.make('StreetFighterIi-v0')
+
+
+        self.action_size = len(self.env.env.get_action_meanings())
+        print("Action size: ", self.action_size)
+        print(self.env.env.get_action_meanings())
+
+        #action plus down-scaled grayscale pixels
+        #images from the game is (3 x 224 x 256), but we 
+        #downscale to (1 x 28 x 32).
+
+        self.model = Model(10, self.action_size, 256, 256)
+
+        total_length = 0
+        for p in self.model.parameters():
+            kern = 1
+            for s in p.size():
+                kern *= s
+            print("kern size ", kern)
+            total_length += kern 
+         
+        print("total ", total_length)
+
+        #self.solution_vector_length = self.model.para
+        
+        self.solution_vector_length = total_length
+        print("Solution vector length given to darwin: ", self.solution_vector_length)
 
         dre.BaseProblem.__init__(
             self,
             objective_sense = dre.ObjectiveSense.maximization,
-            initial_lower_bounds = solution_vector_length * [0.],
-            initial_upper_bounds = solution_vector_length * [0.01])
+            initial_lower_bounds = self.solution_vector_length * [-1.0],
+            initial_upper_bounds = self.solution_vector_length * [1.0])
 
-        self.env = gym.make('StreetFighterIi-v0')
 
         self.vis = False
-        self.current_iter = -1
     
     def obs_proc(self,obs):
-        return block_reduce(obs, block_size=(8,8,3), func=np.max)
+        #br = block_reduce(obs, block_size=(1,1,1), func=np.max)
+        br = obs
+        #pad zeros in first dimension (height)
+        return np.pad(br, ((0,32),(0,0),(0,0)), 'constant', constant_values=0)
 
-    def _how_to_evaluate(self, x):
+    def _how_to_evaluate(self, mutant):
         o = self.env.reset()
         d = False
         reward = 0.0 
-        
-        x = np.array(x, dtype=float)
-        x = x.reshape((-1,20))
+             
+        #params = torch.from_numpy(np.array(params, dtype=float))
+     
+        #from mutant to torch.
+          
+          
+        #x = x.reshape((-1,self.))
 
-        last_action_vector = np.zeros((20))
+        last_action_vector = np.zeros((self.action_size))
+
+        #darwin-to-pytorch parameters
+        vector_i = 0
+        for tensor, index in module_parameter_indices(self.model):
+            tensor[index] = mutant[vector_i]
+            vector_i += 1
+        #now model is updated 
+
         frame = 0 
-        while not d:
-            #action = env.action_space.sample()
-            action = np.matmul(
-                        np.append(
-                            self.obs_proc(o).flatten(),
-                            last_action_vector),
-                    x)
-            last_action_vector = copy.copy(action)
 
-            action = np.argmax(action)
+        action_distribution = {}
+        action_index = {}
+        for i, a in enumerate(self.env.env.get_action_meanings()):
+            action_distribution[a] = 0
+            action_index[i] = a
+
+        while not d:
+            o = self.obs_proc(o)  #now it's 28x32x1
+            o = np.moveaxis(o, 2, 0)  #now it's 1x28x32
+            o = o[np.newaxis, :]  #now it's 1x1x3x3
+            o = np.asarray(o, dtype='float32')
+            o /= 255.
+
+            action_pred = self.model(Variable(torch.from_numpy(o), requires_grad=False))
+
+            action = np.argmax(action_pred.data.numpy())
+          
+            #uggh... 
+            action_distribution[action_index[action]] += 1
+
             o, r, d, i = self.env.step(int(action))
             reward += r
             if self.vis:
@@ -109,6 +218,8 @@ class SF2(dre.BaseProblem):
             frame += 1
 
         if self.vis:
+            
+            
             subprocess.run(['ffmpeg',
                             '-y',
                             '-i', 
@@ -117,11 +228,48 @@ class SF2(dre.BaseProblem):
                             'libx264', 
                             '-vf', 'fps=50', '-pix_fmt', 'yuv420p',
                             '/tmp/vid' + str(self.current_iter) + '.mp4'])
-            subprocess.run(['rm', '-rf', '/tmp/iter*.png'])
+
+            for i in glob.glob('/tmp/*iter*.png'):
+                subprocess.run(['rm', i])
+
             subprocess.run(['scp',
                             '/tmp/vid' + str(self.current_iter) + '.mp4',
-                            'atypic@anipsyche.net:/var/www/anipsyche.net/streetfighter/'])
+                            'atypic@anipsyche.net:/var/www/anipsyche.net/streetfighter/best.mp4'])
+
+            #fitness plot
+            reward_history=None
+            with open('rewards.log', 'r+') as fp:
+                loaded = json.loads(fp.read())
+                loaded['reward_log'].append(reward)
+                reward_history = loaded['reward_log'] 
+
+            with open('rewards.log', 'w+') as fp:
+                print(json.dumps({'reward_log': reward_history}), file=fp)
+
+            fig, ax  = plt.subplots(nrows = 1, ncols = 1)
+            ax.plot(reward_history)
+            fig.savefig('/tmp/reward_plot.png')
+            plt.close(fig)
             
+            #metadata json
+            with open('/tmp/evometa.json', 'w') as fp:
+                print(json.dumps(
+                    {'iteration': self.current_iter,
+                     'actions': action_distribution,
+                     'reward_log' : reward_history,
+                     'reward': reward}
+                    ), file=fp)
+
+
+            subprocess.run(['scp',
+                            '/tmp/evometa.json',
+                            '/tmp/reward_plot.png',
+                            'atypic@anipsyche.net:/var/www/anipsyche.net/streetfighter/'])
+           
+            for i in glob.glob('/tmp/*vid*.mp4'):
+                subprocess.run(['rm', i])
+
+           
         return reward
 
     SolutionVector = dre.BaseProblem.RealValuedSolutionVector 
@@ -135,8 +283,7 @@ def visualize(fname, iteration):
     with open(fname, 'r') as fp:
         sol = json.loads(fp.read())
   
-    length = int((20 + (224/8) * (256/8)) * 20)
-    foo = SF2(length)
+    foo = SF2()
     foo.vis = True
     foo.current_iter = iteration
 
@@ -160,6 +307,9 @@ def main(nactors,
 #         visualize_at_end,
          _seed):
 
+    
+    with open('rewards.log', 'w') as fp:
+        print(json.dumps({'reward_log': list()}), file=fp)
     # get the class of the search method
     # e.g.: if the configuration `optimizer` is given as "XNES",
     #       the variable `search` stores the class `dre.XNES`
@@ -192,12 +342,11 @@ def main(nactors,
 
     # initialize the problem description
 #    problem = RLProblem(
-#        runner,
+#        runnerm,
 #        seed=0 if same_seed else None,
 #        with_observation_normalization=observation_normalization)
 
-    length = int((20 + (224/8) * (256/8)) * 20)
-    problem = SF2(length)
+    problem = SF2()
 
     # initialize the Parameters of the search method
     params = search.Parameters()
