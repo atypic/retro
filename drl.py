@@ -53,9 +53,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-
+    
 
 if __name__ == "__main__":
+    ray.init(redis_address=ray.services.get_node_ip_address() + ":6379")
     ex = Experiment()
 else:
     ex = DontExperiment()
@@ -63,11 +64,11 @@ else:
 
 @ex.config
 def config():
-    nactors = 160  # how many ray actors will be created (if <0, set as #CPUs)
+    nactors = 150  # how many ray actors will be created (if <0, set as #CPUs)
     envname = 'StreetFigherIi-v0'  # which gym environment is to be solved
     optimizer = 'ARS'  # which search method is to use (ARS,XNES,SNES,BDNES)
     niters = 10000  # number of iterations
-    popsize = 160  # population size
+    popsize = 60  # population size
     truncation_size = 20  # truncation size for ARS
     learning_rate = 0.05  # NES learning rate for search distribution reshaping
     center_learning_rate = 1.0  # NES learning rate for the center of dist
@@ -78,7 +79,6 @@ def config():
     observation_normalization = False  # "virtual batch normalization"
 
 
-ray.init()
 
 class Model(nn.Module):
     def __init__(self, conv_depth, output_size, img_w, img_h, img_depth=1):
@@ -307,6 +307,8 @@ def main(nactors,
 #         visualize_at_end,
          _seed):
 
+
+    	
     
     with open('rewards.log', 'w') as fp:
         print(json.dumps({'reward_log': list()}), file=fp)
