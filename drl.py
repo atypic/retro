@@ -83,11 +83,13 @@ def config():
 class Model(nn.Module):
     def __init__(self, conv_depth, output_size, img_w, img_h, img_depth=1):
         super(Model, self).__init__()
+
+        #1 depth in, 10 kernels of 3x3 
         self.conv1 = nn.Conv2d(1, 10, 3, padding=1)
 
 
         #hiddus 
-        self.rnn1 = nn.RNN(10*int(img_w/8)*int(img_h/8), output_size, 1, nonlinearity='relu')
+        self.rnn1 = nn.RNN(10*int(img_w)*int(img_h), output_size, 1, nonlinearity='relu')
 
         #output is supposed to be... (N, C_out, H_out, W_out)
         #10 kernels, with pooling in between
@@ -134,7 +136,7 @@ class SF2(dre.BaseProblem):
         #images from the game is (3 x 224 x 256), but we 
         #downscale to (1 x 28 x 32).
 
-        self.model = Model(10, self.action_size, 256, 256)
+        self.model = Model(10, self.action_size, 84, 84)
 
         total_length = 0
         for p in self.model.parameters():
@@ -161,10 +163,10 @@ class SF2(dre.BaseProblem):
         self.vis = False
     
     def obs_proc(self,obs):
-        br = block_reduce(obs, block_size=(1,1,3), func=np.max)
+        paddy = np.pad(br[:,:252,:], ((0,28),(0,0),(0,0)), 'constant', constant_values=0)  #252,252,3
+        return block_reduce(paddy, block_size=(3,3,3), func=np.max) #
         #br = obs
         #pad zeros in first dimension (height)
-        return np.pad(br, ((0,32),(0,0),(0,0)), 'constant', constant_values=0)
 
     def _how_to_evaluate(self, mutant):
         o = self.env.reset()
@@ -196,11 +198,11 @@ class SF2(dre.BaseProblem):
             action_index[i] = a
 
         while not d:
-            o = self.obs_proc(o)  #now it's 28x32x1
-            o = np.moveaxis(o, 2, 0)  #now it's 1x28x32
-            o = o[np.newaxis, :]  #now it's 1x1x3x3
-            o = np.asarray(o, dtype='float32')
-            o /= 255.
+            o = self.obs_proc(o)  #now it's 84x84x1
+            o = np.moveaxis(o, 2, 0)  #now it's 1x84x84
+            o = o[np.newaxis, :]  #now it's 1x1x84x84
+            o = np.asarray(o, dtype='float32') 
+            o /= 255.   #make into floats
 
             action_pred = self.model(Variable(torch.from_numpy(o), requires_grad=False))
 
@@ -354,7 +356,7 @@ def main(nactors,
     params = search.Parameters()
 
     # initialize the ray actors
-    actors = [spawn_actor(problem) for _ in xrange(nactors)]
+    actors = ray.get([spawn_actor(problem) for _ in xrange(nactors)])
     params.ray_actors = actors
 
     # set the population size
