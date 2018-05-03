@@ -2,11 +2,13 @@
 
 from __future__ import print_function, division
 
+from darwin.distributable import Distributable
 import glob
 
 from datetime import datetime
 
 import subprocess
+import time
 
 import json
 import copy
@@ -64,16 +66,16 @@ else:
 
 @ex.config
 def config():
-    nactors = 150  # how many ray actors will be created (if <0, set as #CPUs)
+    nactors = 320  # how many ray actors will be created (if <0, set as #CPUs)
     envname = 'StreetFigherIi-v0'  # which gym environment is to be solved
     optimizer = 'ARS'  # which search method is to use (ARS,XNES,SNES,BDNES)
     niters = 10000  # number of iterations
-    popsize = 60  # population size
+    popsize = 100  # population size
     truncation_size = 20  # truncation size for ARS
     learning_rate = 0.05  # NES learning rate for search distribution reshaping
     center_learning_rate = 1.0  # NES learning rate for the center of dist
-    stdev = 0.1  # standard deviation of the search distribution
-    nsamples = 10  # by using how many trajectories will an agent be evaluated
+    stdev = 0.05  # standard deviation of the search distribution
+    nsamples = 20  # by using how many trajectories will an agent be evaluated
     same_seed = True  # will the trajectories be created using the same seed
     alive_bonus_to_remove = -1.0  # If >0, this amount will be removed from R(t)
     observation_normalization = False  # "virtual batch normalization"
@@ -81,15 +83,16 @@ def config():
 
 
 class Model(nn.Module):
-    def __init__(self, conv_depth, output_size, img_w, img_h, img_depth=1):
+    def __init__(self, conv_depth, output_size, img_w, img_h, maxpool_1_kernel_size = 8, img_depth=1):
         super(Model, self).__init__()
 
         #1 depth in, 10 kernels of 3x3 
-        self.conv1 = nn.Conv2d(1, 10, 3, padding=1)
+        self.conv1 = nn.Conv2d(img_depth, 10, 3, padding=1)
 
+        self.maxpool_1_kernel_size = maxpool_1_kernel_size
 
         #hiddus 
-        self.rnn1 = nn.RNN(10*int(img_w)*int(img_h), output_size, 1, nonlinearity='relu')
+        self.rnn1 = nn.RNN(10*int(img_w/maxpool_1_kernel_size)*int(img_h/maxpool_1_kernel_size), output_size, 1, nonlinearity='relu')
 
         #output is supposed to be... (N, C_out, H_out, W_out)
         #10 kernels, with pooling in between
@@ -98,7 +101,7 @@ class Model(nn.Module):
         self.h0 = Variable(torch.zeros(1,1, output_size), requires_grad=False)
 
     def forward(self, x):
-       x = F.relu(F.max_pool2d(self.conv1(x), kernel_size=8, stride=8))
+       x = F.relu(F.max_pool2d(self.conv1(x), kernel_size=self.maxpool_1_kernel_size, stride=self.maxpool_1_kernel_size))
 
        r = x.view(1,1, self.num_flat_features(x))
        
@@ -119,18 +122,20 @@ class Model(nn.Module):
         num_features = 1
         for s in size:       # Get the products
             num_features *= s
-        return num_features    
- 
+        return num_features
+    
 class SF2(dre.BaseProblem):
     def __init__(self):
 
-        
+        import gym_rle
         self.env = gym.make('StreetFighterIi-v0')
 
+        print("1")
 
         self.action_size = len(self.env.env.get_action_meanings())
         print("Action size: ", self.action_size)
         print(self.env.env.get_action_meanings())
+        print("2")
 
         #action plus down-scaled grayscale pixels
         #images from the game is (3 x 224 x 256), but we 
@@ -138,6 +143,7 @@ class SF2(dre.BaseProblem):
 
         self.model = Model(10, self.action_size, 84, 84)
 
+        print("3")
         total_length = 0
         for p in self.model.parameters():
             kern = 1
@@ -163,7 +169,7 @@ class SF2(dre.BaseProblem):
         self.vis = False
     
     def obs_proc(self,obs):
-        paddy = np.pad(br[:,:252,:], ((0,28),(0,0),(0,0)), 'constant', constant_values=0)  #252,252,3
+        paddy = np.pad(obs[:,:252,:], ((0,28),(0,0),(0,0)), 'constant', constant_values=0)  #252,252,3
         return block_reduce(paddy, block_size=(3,3,3), func=np.max) #
         #br = obs
         #pad zeros in first dimension (height)
@@ -277,7 +283,7 @@ class SF2(dre.BaseProblem):
     SolutionVector = dre.BaseProblem.RealValuedSolutionVector 
 
 
-
+SF2Worker = ray.remote(SF2)
 
 @ex.command
 def visualize(fname, iteration):
@@ -350,62 +356,41 @@ def main(nactors,
 #        seed=0 if same_seed else None,
 #        with_observation_normalization=observation_normalization)
 
-    problem = SF2()
+    #problem = SF2()
 
     # initialize the Parameters of the search method
     params = search.Parameters()
 
-    # initialize the ray actors
-    actors = ray.get([spawn_actor(problem) for _ in xrange(nactors)])
-    params.ray_actors = actors
+    actors = [SF2Worker.remote() for _ in xrange(nactors)]
+    print(actors)
+
+    def eval_stuff(solutions):
+        fitnesses = []
+        for solution in solutions:
+            values = solution.get_values()  # gets a numpy array
+            rollout_ids = [actor._how_to_evaluate.remote(solution) for actor in actors]
+            for res in ray.get(rollout_ids):
+                fitness = res  
+                fitnesses.append(fitness)
+        return fitnesses
+
+    params.evaluation_loop = eval_stuff
 
     # set the population size
     params.population_size = popsize
-
-    # set the truncation size
-    if issubclass(search, dre.ARS):
-        params.truncation_size = truncation_size
-
-    # set the block sizes for BDNES
-    if issubclass(search, dre.BDNES):
-        params.block_sizes = runner.get_block_sizes_for_bdnes()
-
-    # set the stdev
-    if issubclass(search, dre.XNES):
-        sollength = runner.get_solution_vector_length()
-        params.initial_stdev = np.array([float(stdev)] * sollength)
-    else:
-        params.stdev = float(stdev)
+    params.truncation_size = truncation_size
+    params.stdev = float(stdev)
 
     # set the learning rates
     params.learning_rate = learning_rate
-    if issubclass(search, dre.XNES):
-        params.center_learning_rate = center_learning_rate
 
+    pr = SF2()
     # initialize the search algorithm
-    searcher = search(problem, rndgen, params)
+    searcher = search(pr, rndgen, params)
 
     # start the optimization
     for iteration in xrange(1, niters + 1):
         searcher.iterate()
-
-        # if the observation normalization configuration is on,
-        # then we have to communicate with the workers
-        if observation_normalization:
-            # collect observation stats from the actors
-            collected_stats = ray.get(
-                [actor.get_collected_observation_stats.remote()
-                 for actor in actors])
-
-            # update the normalizer of the master problem definition
-            for stats in collected_stats:
-                problem.update_observation_normalizer(stats)
-
-            # upload the updated master normalizer to the actors
-            ray.get(
-                [actor.use_master_observation_normalizer.remote(
-                    problem.get_collected_observation_stats())
-                 for actor in actors])
 
         ex.log_scalar('best_solution', searcher.best.evaluation)
         ex.log_scalar('center_solution', searcher.population_center.evaluation)
