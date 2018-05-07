@@ -300,7 +300,14 @@ def main():
         ga.iterate()
         print("Iteration: ", iteration + 1)
         print("Best averaged cumulative reward:", ga[0].evaluation)
- 
+
+        #Save the solution so we can load it for visualization
+        log_fname = 'sol_' + str(iteration) + '.json'
+
+        with open(log_fname, 'w') as fp:
+            print(json.dumps(list(ga[0].get_values())), file=fp)
+
+        visualize(log_fname, iteration)
 
 
 if __name__ == "__main__":
