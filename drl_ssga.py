@@ -66,12 +66,12 @@ class Model(nn.Module):
         super(Model, self).__init__()
 
         #1 depth in, 10 kernels of 3x3 
-        self.conv1 = nn.Conv2d(img_depth, 10, 3, padding=1)
+        self.conv1 = nn.Conv2d(img_depth, 10, 5, padding=2)
 
         self.maxpool_1_kernel_size = maxpool_1_kernel_size
 
         #hiddus 
-        self.rnn1 = nn.RNN(10*int(img_w/maxpool_1_kernel_size)*int(img_h/maxpool_1_kernel_size), output_size, 1, nonlinearity='relu')
+        self.rnn1 = nn.RNN(10 * int(img_w/maxpool_1_kernel_size)*int(img_h/maxpool_1_kernel_size), output_size, 1, nonlinearity='tanh')
 
         #output is supposed to be... (N, C_out, H_out, W_out)
         #10 kernels, with pooling in between
@@ -80,18 +80,18 @@ class Model(nn.Module):
         self.h0 = Variable(torch.zeros(1,1, output_size), requires_grad=False)
 
     def forward(self, x):
-       x = F.relu(F.max_pool2d(self.conv1(x), kernel_size=self.maxpool_1_kernel_size, stride=self.maxpool_1_kernel_size))
+        x = F.relu(F.max_pool2d(self.conv1(x), kernel_size=self.maxpool_1_kernel_size, stride=self.maxpool_1_kernel_size))
+      
+        r = x.view(1,1, self.num_flat_features(x))
 
-       r = x.view(1,1, self.num_flat_features(x))
-       
-       x, self.h0 = self.rnn1(r, self.h0)
+        x, self.h0 = self.rnn1(r, self.h0)
 
-       self.h0 = self.h0.detach()
+        self.h0 = self.h0.detach()
 
-       #flattening it is important. no flatten means no worky work.
-       #x = x.view(-1, self.num_flat_features(x))   #flatten it
-       #fcx = self.fc1(x)
-       return x
+        #flattening it is important. no flatten means no worky work.
+        #x = x.view(-1, self.num_flat_features(x))   #flatten it
+        #fcx = self.fc1(x)
+        return x
 
     def update_weights(self, w):
         self.weight.conv1.data = w
@@ -142,8 +142,8 @@ class SF2(dre.BaseProblem):
         dre.BaseProblem.__init__(
             self,
             objective_sense = dre.ObjectiveSense.maximization,
-            initial_lower_bounds = self.solution_vector_length * [-1.0],
-            initial_upper_bounds = self.solution_vector_length * [1.0])
+            initial_lower_bounds = self.solution_vector_length * [-.1],
+            initial_upper_bounds = self.solution_vector_length * [.1])
 
 
         self.vis = False
@@ -155,11 +155,9 @@ class SF2(dre.BaseProblem):
         #pad zeros in first dimension (height)
 
     def _how_to_evaluate(self, mutant):
-        o = self.env.reset()
         d = False
-        reward = 0.0 
-
-        last_action_vector = np.zeros((self.action_size))
+        reward = 0.0
+        retries = 15
 
         #darwin-to-pytorch parameters
         vector_i = 0
@@ -176,30 +174,39 @@ class SF2(dre.BaseProblem):
             action_distribution[a] = 0
             action_index[i] = a
 
-        while not d:
-            o = self.obs_proc(o)  #now it's 84x84x1
-            o = np.moveaxis(o, 2, 0)  #now it's 1x84x84
-            o = o[np.newaxis, :]  #now it's 1x1x84x84
-            o = np.asarray(o, dtype='float32') 
-            o /= 255.   #make into floats
-
-            action_pred = self.model(Variable(torch.from_numpy(o), requires_grad=False))
-
-            action = np.argmax(action_pred.data.numpy())
-          
-            #uggh... 
-            action_distribution[action_index[action]] += 1
-
-            o, r, d, i = self.env.step(int(action))
-            reward += r
-            if self.vis:
-                #TODO: Dump to .png's
-                arr = self.env.render(mode='rgb_array')
-                imsave('/tmp/iter_'+str(self.current_iter)+'_'+str(frame)+'.png', arr)
-            frame += 1
-
         if self.vis:
+            retries = 3
+
+        for repeat in xrange(retries):
+            o = self.env.reset()
+
+            while not d:
+                o = self.obs_proc(o)  #now it's 84x84x1
+                o = np.moveaxis(o, 2, 0)  #now it's 1x84x84
+                o = o[np.newaxis, :]  #now it's 1x1x84x84
+                o = np.asarray(o, dtype='float32') 
+                o /= 255.   #make into floats
+
+                action_pred = self.model(Variable(torch.from_numpy(o), requires_grad=False))
             
+    #            if self.vis:
+    #                print("Output from network:", action_pred)
+
+                action = np.argmax(action_pred.data.numpy())
+              
+                #uggh... 
+                action_distribution[action_index[action]] += 1
+
+                o, r, d, i = self.env.step(int(action))
+                reward += r
+                if self.vis:
+                    #TODO: Dump to .png's
+                    arr = self.env.render(mode='rgb_array')
+                    imsave('/tmp/iter_'+str(self.current_iter)+'_'+str(frame)+'.png', arr)
+                frame += 1
+
+        #now done, make a video...
+        if self.vis:
             
             subprocess.run(['ffmpeg',
                             '-y',
@@ -207,7 +214,7 @@ class SF2(dre.BaseProblem):
                             '/tmp/iter_' + str(self.current_iter) + '_%d.png',
                             '-c:v',
                             'libx264', 
-                            '-vf', 'fps=50', '-pix_fmt', 'yuv420p',
+                            '-vf', 'fps=60', '-pix_fmt', 'yuv420p',
                             '/tmp/vid' + str(self.current_iter) + '.mp4'])
 
             for i in glob.glob('/tmp/*iter*.png'):
@@ -251,7 +258,7 @@ class SF2(dre.BaseProblem):
                 subprocess.run(['rm', i])
 
            
-        return reward
+        return reward/retries
 
     SolutionVector = dre.BaseProblem.RealValuedSolutionVector 
 
@@ -275,20 +282,21 @@ class StreetActor(dre.EvaluationActor):
 
     def evaluate(self, solution):
         return self.problem._how_to_evaluate(solution)
+        
 
 
 def main():
 
     problem = SF2()
-    nactors = 10
+    nactors = 100
     niters = 10000
 
     params = dre.SteadyStateGA.Parameters()
     params.ray_actors = [StreetActor.remote() for _ in xrange(nactors)]
-    params.population_size = 8
+    params.population_size = 200
     params.mutation_method = drt.apply_gaussian_mutation
     params.cross_over_method = drt.apply_intermediate_recombination
-    params.gaussian_mutation_stdev = 1
+    params.gaussian_mutation_stdev = 0.01
     params.recombination_min_range = 1
 
     rndgen = random.Random()
